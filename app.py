@@ -12,28 +12,27 @@ st.set_page_config(page_title="PrestaShop Auto-Scraper", page_icon="🛒", layou
 st.title("🛒 PrestaShop Auto-Scraper")
 st.markdown("Extrayez l'intégralité d'un catalogue PrestaShop via son Sitemap.")
 
-def get_urls_from_sitemap(sitemap_url):
-    """Extrait toutes les URLs d'un fichier Sitemap XML."""
-    headers = {"User-Agent": "Mozilla/5.0"}
+def extract_urls_from_xml_root(root):
+    """Extrait les URLs d'un noeud racine XML."""
+    namespaces = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+    urls = [elem.text for elem in root.findall('.//ns:loc', namespaces)]
+    if not urls:
+        urls = [elem.text for elem in root.findall('.//{*}loc')]
+    return urls
+
+def get_urls_from_sitemap_url(sitemap_url):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         response = requests.get(sitemap_url, headers=headers, timeout=10)
         if response.status_code == 200:
             root = ET.fromstring(response.content)
-            # Gestion du namespace XML standard des sitemaps
-            namespaces = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-            urls = [elem.text for elem in root.findall('.//ns:loc', namespaces)]
-            
-            # Si le namespace n'est pas standard, fallback brutal
-            if not urls:
-                urls = [elem.text for elem in root.findall('.//{*}loc')]
-            return urls
+            return extract_urls_from_xml_root(root)
         else:
             return f"Erreur HTTP {response.status_code}"
     except Exception as e:
         return str(e)
 
 def parse_prestashop_product(html):
-    """Cible les balises standards d'un thème PrestaShop (Classic et dérivés)."""
     soup = BeautifulSoup(html, 'html.parser')
     data = {
         'Titre': '',
@@ -44,36 +43,29 @@ def parse_prestashop_product(html):
         'Image_Principale': ''
     }
     
-    # Titre (h1 avec itemprop ou classe courante)
     titre_tag = soup.select_one('h1[itemprop="name"], h1.h1, .product-title')
     if titre_tag: data['Titre'] = titre_tag.get_text(strip=True)
         
-    # SKU / Référence
     ref_tag = soup.select_one('[itemprop="sku"], .product-reference span')
     if ref_tag: data['Reference_SKU'] = ref_tag.get_text(strip=True)
         
-    # Prix
     prix_tag = soup.select_one('[itemprop="price"], .current-price span:first-child')
     if prix_tag: 
-        # Parfois le prix est dans l'attribut content
         data['Prix'] = prix_tag.get('content') or prix_tag.get_text(strip=True)
         
-    # Description Courte
     desc_courte_tag = soup.select_one('#product-description-short, [itemprop="description"] p')
     if desc_courte_tag: data['Description_Courte'] = desc_courte_tag.get_text(separator=' ', strip=True)
         
-    # Description Longue (Onglet détails)
     desc_long_tag = soup.select_one('#description, .product-description')
     if desc_long_tag: data['Description_Longue'] = desc_long_tag.get_text(separator='\n', strip=True)
         
-    # Image
     img_tag = soup.select_one('.product-cover img, [itemprop="image"]')
     if img_tag: data['Image_Principale'] = img_tag.get('src') or img_tag.get('data-image-large-src', '')
         
     return data
 
 def fetch_and_parse(url, retries=2):
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     for _ in range(retries):
         try:
             resp = requests.get(url, headers=headers, timeout=8)
@@ -87,25 +79,47 @@ def fetch_and_parse(url, retries=2):
         except Exception:
             time.sleep(2)
             
-    return {'URL': url, 'Statut': 'Échec', 'Titre': '', 'Reference_SKU': '', 'Prix': '', 'Description_Courte': '', 'Description_Longue': '', 'Image_Principale': ''}
+    return {'URL': url, 'Statut': 'Échec / Protégé', 'Titre': '', 'Reference_SKU': '', 'Prix': '', 'Description_Courte': '', 'Description_Longue': '', 'Image_Principale': ''}
 
-# Interface Utilisateur
 st.subheader("1. Trouver les pages produits")
-sitemap_input = st.text_input("URL du Sitemap PrestaShop", placeholder="https://www.boutique.com/1_fr_0_sitemap.xml")
+methode = st.radio("Méthode de lecture du Sitemap :", ["Par URL (Sites non protégés)", "Uploader un fichier XML (Si Erreur 403)"])
+
+filtrer_produits = st.checkbox("🎯 Ne garder que les URLs de produits (.html)", value=True)
 
 if 'urls_trouvees' not in st.session_state:
     st.session_state.urls_trouvees = []
 
-if st.button("🔍 Analyser le Sitemap"):
-    if sitemap_input:
-        resultat = get_urls_from_sitemap(sitemap_input)
-        if isinstance(resultat, list):
-            # Filtrer sommairement pour ignorer les pages CMS/Catégories si possible
-            # Sur PrestaShop, les produits ont souvent des ID au début (ex: /12-mon-produit.html)
-            st.session_state.urls_trouvees = resultat
-            st.success(f"Sitemap lu avec succès ! {len(resultat)} liens trouvés.")
+resultat_lecture = None
+
+if methode == "Par URL (Sites non protégés)":
+    sitemap_input = st.text_input("URL du Sitemap", placeholder="https://www.boutique.com/sitemap.xml")
+    if st.button("🔍 Analyser l'URL"):
+        if sitemap_input:
+            resultat_lecture = get_urls_from_sitemap_url(sitemap_input)
+
+elif methode == "Uploader un fichier XML (Si Erreur 403)":
+    fichier_xml = st.file_uploader("Glissez votre fichier sitemap.xml ici", type=["xml"])
+    if st.button("🔍 Analyser le Fichier"):
+        if fichier_xml:
+            try:
+                tree = ET.parse(fichier_xml)
+                root = tree.getroot()
+                resultat_lecture = extract_urls_from_xml_root(root)
+            except Exception as e:
+                resultat_lecture = f"Erreur de lecture du fichier : {e}"
+
+# Traitement du résultat
+if resultat_lecture is not None:
+    if isinstance(resultat_lecture, list):
+        if filtrer_produits:
+            urls_initiales = len(resultat_lecture)
+            resultat_lecture = [url for url in resultat_lecture if str(url).endswith('.html')]
+            st.success(f"Sitemap lu ! {urls_initiales} liens ➔ {len(resultat_lecture)} produits conservés.")
         else:
-            st.error(f"Impossible de lire le sitemap : {resultat}")
+            st.success(f"Sitemap lu avec succès ! {len(resultat_lecture)} liens trouvés.")
+        st.session_state.urls_trouvees = resultat_lecture
+    else:
+        st.error(f"Impossible de lire le sitemap : {resultat_lecture}")
 
 if st.session_state.urls_trouvees:
     with st.expander("Voir un aperçu des URLs trouvées"):
@@ -126,7 +140,7 @@ if st.session_state.urls_trouvees:
             for i, future in enumerate(futures):
                 resultats_finaux.append(future.result())
                 barre.progress((i + 1) / total)
-                texte_statut.text(f"Progression : {i+1}/{total} produits scannés")
+                texte_statut.text(f"Progression : {i+1}/{total} pages scannées")
                 
         df = pd.DataFrame(resultats_finaux)
         succes = len(df[df['Statut'] == 'OK'])
