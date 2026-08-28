@@ -8,12 +8,10 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="PrestaShop Auto-Scraper", page_icon="🛒", layout="centered")
-
 st.title("🛒 PrestaShop Auto-Scraper")
 st.markdown("Extrayez l'intégralité d'un catalogue PrestaShop via son Sitemap.")
 
 def extract_urls_from_xml_root(root):
-    """Extrait les URLs d'un noeud racine XML."""
     namespaces = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
     urls = [elem.text for elem in root.findall('.//ns:loc', namespaces)]
     if not urls:
@@ -21,7 +19,7 @@ def extract_urls_from_xml_root(root):
     return urls
 
 def get_urls_from_sitemap_url(sitemap_url):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         response = requests.get(sitemap_url, headers=headers, timeout=10)
         if response.status_code == 200:
@@ -43,29 +41,49 @@ def parse_prestashop_product(html):
         'Image_Principale': ''
     }
     
-    titre_tag = soup.select_one('h1[itemprop="name"], h1.h1, .product-title')
+    # TITRE
+    titre_tag = soup.select_one('h1[itemprop="name"], h1.h1, h1.product-title, h1')
     if titre_tag: data['Titre'] = titre_tag.get_text(strip=True)
         
-    ref_tag = soup.select_one('[itemprop="sku"], .product-reference span')
+    # SKU
+    ref_tag = soup.select_one('[itemprop="sku"], .product-reference span, .reference')
     if ref_tag: data['Reference_SKU'] = ref_tag.get_text(strip=True)
         
-    prix_tag = soup.select_one('[itemprop="price"], .current-price span:first-child')
+    # PRIX
+    prix_tag = soup.select_one('[itemprop="price"], .current-price span:first-child, .price')
     if prix_tag: 
         data['Prix'] = prix_tag.get('content') or prix_tag.get_text(strip=True)
         
-    desc_courte_tag = soup.select_one('#product-description-short, [itemprop="description"] p')
+    # DESCRIPTION COURTE
+    desc_courte_tag = soup.select_one('#product-description-short, .product-short-description, [itemprop="description"] p')
     if desc_courte_tag: data['Description_Courte'] = desc_courte_tag.get_text(separator=' ', strip=True)
         
-    desc_long_tag = soup.select_one('#description, .product-description')
-    if desc_long_tag: data['Description_Longue'] = desc_long_tag.get_text(separator='\n', strip=True)
+    # DESCRIPTION LONGUE (Élargissement massif des cibles CSS)
+    # On cherche dans de multiples zones où les thèmes custom rangent le texte
+    desc_long_tags = soup.select('#description, .product-description, .product-information, .tabs, .product-tabs, .accordion, .description')
+    if desc_long_tags:
+        # On fusionne le texte de toutes ces boîtes si elles existent
+        textes = [tag.get_text(separator='\n', strip=True) for tag in desc_long_tags]
+        # Nettoyage pour éviter les doublons géants
+        texte_final = "\n\n".join(list(dict.fromkeys(textes)))
+        data['Description_Longue'] = texte_final
         
-    img_tag = soup.select_one('.product-cover img, [itemprop="image"]')
-    if img_tag: data['Image_Principale'] = img_tag.get('src') or img_tag.get('data-image-large-src', '')
+    # IMAGE (Contournement du Lazy Loading)
+    img_tag = soup.select_one('.product-cover img, [itemprop="image"], .product-image img')
+    if img_tag:
+        # On teste tous les attributs où la VRAIE image pourrait être cachée
+        data['Image_Principale'] = (
+            img_tag.get('data-src') or 
+            img_tag.get('data-lazy-src') or 
+            img_tag.get('data-original') or 
+            img_tag.get('data-image-large-src') or 
+            img_tag.get('src')
+        )
         
     return data
 
 def fetch_and_parse(url, retries=2):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     for _ in range(retries):
         try:
             resp = requests.get(url, headers=headers, timeout=8)
@@ -82,7 +100,7 @@ def fetch_and_parse(url, retries=2):
     return {'URL': url, 'Statut': 'Échec / Protégé', 'Titre': '', 'Reference_SKU': '', 'Prix': '', 'Description_Courte': '', 'Description_Longue': '', 'Image_Principale': ''}
 
 st.subheader("1. Trouver les pages produits")
-methode = st.radio("Méthode de lecture du Sitemap :", ["Par URL (Sites non protégés)", "Uploader un fichier XML (Si Erreur 403)"])
+methode = st.radio("Méthode de lecture du Sitemap :", ["Uploader un fichier XML (Si Erreur 403)", "Par URL (Sites non protégés)"])
 
 filtrer_produits = st.checkbox("🎯 Ne garder que les URLs de produits (.html)", value=True)
 
@@ -108,7 +126,6 @@ elif methode == "Uploader un fichier XML (Si Erreur 403)":
             except Exception as e:
                 resultat_lecture = f"Erreur de lecture du fichier : {e}"
 
-# Traitement du résultat
 if resultat_lecture is not None:
     if isinstance(resultat_lecture, list):
         if filtrer_produits:
